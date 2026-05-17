@@ -6,7 +6,8 @@
 # Run as your normal user (NOT root)
 # ============================================================
 
-set -e  # exit on any error
+# Do NOT use set -e globally; we handle errors manually
+# so services failing mid-install don't kill the whole script
 
 # Colors
 RED='\033[0;31m'
@@ -33,7 +34,14 @@ log "Starting Sway environment setup..."
 # ── System update ────────────────────────────────────────────
 
 log "Updating system..."
-sudo pacman -Syu --noconfirm
+sudo pacman -Syu --noconfirm || die "System update failed."
+
+# ── Remove pulseaudio if installed (conflicts with pipewire-pulse) ──
+
+if pacman -Qq pulseaudio &>/dev/null; then
+  warn "pulseaudio detected, removing to avoid conflict with pipewire..."
+  sudo pacman -Rns --noconfirm pulseaudio pulseaudio-alsa 2>/dev/null || true
+fi
 
 # ── Core packages ────────────────────────────────────────────
 
@@ -51,34 +59,38 @@ sudo pacman -S --noconfirm --needed \
   wl-clipboard \
   jq \
   imagemagick \
-  pulseaudio \
-  pulseaudio-alsa \
+  pipewire \
+  pipewire-pulse \
+  pipewire-alsa \
+  wireplumber \
   playerctl \
   earlyoom \
   iwd \
   git \
+  go \
   base-devel \
   xdg-user-dirs \
   polkit \
   dbus \
-  pipewire \
-  pipewire-pulse \
-  wireplumber
+  notification-daemon || die "Package installation failed."
 
 # ── Directories ──────────────────────────────────────────────
 
 log "Creating required directories..."
 mkdir -p ~/Pictures/screenshots
+mkdir -p ~/.config
 xdg-user-dirs-update
 
 # ── yay (AUR helper) ─────────────────────────────────────────
 
 if ! command -v yay &>/dev/null; then
   log "Installing yay..."
-  cd /tmp
-  git clone https://aur.archlinux.org/yay.git
-  cd yay
-  makepkg -si --noconfirm
+  # Use home dir not /tmp to avoid noexec mount issues
+  BUILD_DIR="$HOME/.builds"
+  mkdir -p "$BUILD_DIR"
+  git clone https://aur.archlinux.org/yay.git "$BUILD_DIR/yay" || die "Failed to clone yay."
+  cd "$BUILD_DIR/yay"
+  makepkg -si --noconfirm || die "yay build failed."
   cd ~
 else
   warn "yay already installed, skipping."
@@ -87,21 +99,30 @@ fi
 # ── Clone sway config ────────────────────────────────────────
 
 log "Cloning sway config..."
-TMPDIR=$(mktemp -d)
-git clone https://github.com/201dreamers/sway-config.git "$TMPDIR/sway-config"
+CLONE_DIR="$HOME/.builds/sway-config"
+
+# Backup existing sway config if present
+if [ -d "$HOME/.config/sway" ]; then
+  BACKUP="$HOME/.config/sway.bak.$(date +%s)"
+  warn "Existing sway config found, backing up to $BACKUP"
+  mv "$HOME/.config/sway" "$BACKUP"
+fi
+
+git clone https://github.com/201dreamers/sway-config.git "$CLONE_DIR" || die "Failed to clone sway-config."
 
 log "Copying config files to ~/.config/..."
-mkdir -p ~/.config
-cp -r "$TMPDIR/sway-config/.config/"* ~/.config/
-rm -rf "$TMPDIR"
+cp -r "$CLONE_DIR/.config/"* ~/.config/
 
-# ── Enable services ──────────────────────────────────────────
-
-log "Enabling user services..."
-systemctl --user enable --now mako || warn "mako service not available yet, start manually after login."
+# ── Enable system services ───────────────────────────────────
 
 log "Enabling earlyoom..."
-sudo systemctl enable --now earlyoom || warn "earlyoom failed, continue anyway."
+sudo systemctl enable --now earlyoom || warn "earlyoom failed to start, non-critical."
+
+# ── Enable user services (best effort, needs user session) ───
+
+log "Attempting to enable user services..."
+systemctl --user enable mako 2>/dev/null || warn "mako user service not enabled now, will auto-start with sway."
+systemctl --user enable wireplumber 2>/dev/null || warn "wireplumber will start with pipewire on login."
 
 # ── Done ─────────────────────────────────────────────────────
 
@@ -110,8 +131,9 @@ echo -e "${GREEN}============================================${NC}"
 echo -e "${GREEN}  Setup complete!${NC}"
 echo -e "${GREEN}============================================${NC}"
 echo ""
-echo "  To start sway, log in and type:  sway"
+echo "  Reboot first:        sudo reboot"
+echo "  Then start sway:     sway"
 echo ""
-warn "If sway fails to start, check: journalctl --user -xe"
-warn "Make sure you are on a TTY (not inside another compositor)"
+warn "If sway fails: journalctl --user -xe"
+warn "Run from TTY, not inside another compositor"
 echo ""
